@@ -84,7 +84,7 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
         };
         webviewPanel.webview.html = this.getViewerHtml(
             path.basename(document.uri.fsPath),
-            `WxH ${rawPngData.width}x${rawPngData.height} • ${rawPngData.style} • ${this.formatFileSize(fileStats.size)} • v${this.context.extension.packageJSON.version}`,
+            `WxH ${rawPngData.width}x${rawPngData.height} • ${rawPngData.style} • ${this.formatFileSize(fileStats.size)}`,
             currentOptions,
         );
 
@@ -204,13 +204,6 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
             border-bottom: 1px solid var(--vscode-panel-border);
             background-color: var(--vscode-editorWidget-background);
         }
-        .title {
-            font-weight: 600;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            max-width: 38vw;
-        }
         .meta {
             color: var(--vscode-descriptionForeground);
             font-size: 12px;
@@ -312,9 +305,8 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
 <body>
     <div class="viewer-root">
         <div class="toolbar">
-            <span class="title">${this.escapeHtml(filename)}</span>
-            <span class="meta">${this.escapeHtml(imageInfo)}</span>
             <label class="control"><input type="checkbox" id="useAlpha"> Alpha</label>
+            <span class="meta">${this.escapeHtml(imageInfo)}</span>
             <button id="saveDefaults">Save Defaults</button>
             <span class="status" id="status">Loading...</span>
         </div>
