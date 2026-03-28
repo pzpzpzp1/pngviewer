@@ -31,3 +31,7 @@ The viewer also includes:
 
    - Open this folder in VSCode and press `F5`.
 
+#### VSIX
+   ```bash
+   npm run package
+   ```

@@ -1,4 +1,6 @@
+import * as fs from "fs";
 import * as path from "path";
+import { PNG } from "pngjs";
 import * as vscode from "vscode";
 
 const VIEW_TYPE = "pngViewer.png";
@@ -10,6 +12,12 @@ type AlphaOptions = {
 
 const DEFAULT_ALPHA_OPTIONS: AlphaOptions = {
     useAlpha: true,
+};
+
+type RawPngData = {
+    width: number;
+    height: number;
+    rgbaBase64: string;
 };
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -57,20 +65,33 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
         webviewPanel: vscode.WebviewPanel,
         token: vscode.CancellationToken,
     ): Promise<void> {
+        const currentOptions = this.getSavedOptions();
+        let rawPngData: RawPngData;
+        try {
+            rawPngData = this.loadPngData(document.uri.fsPath);
+        } catch (error) {
+            const errorMessage =
+                error instanceof Error ? error.message : "Failed to decode PNG file.";
+            webviewPanel.webview.html = this.getErrorHtml(errorMessage);
+            return;
+        }
+
         webviewPanel.webview.options = {
             enableScripts: true,
-            localResourceRoots: [vscode.Uri.file(path.dirname(document.uri.fsPath))],
         };
-
-        const currentOptions = this.getSavedOptions();
-        const imageUri = webviewPanel.webview.asWebviewUri(document.uri);
-        webviewPanel.webview.html = this.getViewerHtml(
-            path.basename(document.uri.fsPath),
-            imageUri.toString(),
-            currentOptions,
-        );
+        webviewPanel.webview.html = this.getViewerHtml(path.basename(document.uri.fsPath), currentOptions);
 
         webviewPanel.webview.onDidReceiveMessage(async (message) => {
+            if (message?.type === "webviewReady") {
+                await webviewPanel.webview.postMessage({
+                    type: "imageLoaded",
+                    width: rawPngData.width,
+                    height: rawPngData.height,
+                    rgbaBase64: rawPngData.rgbaBase64,
+                });
+                return;
+            }
+
             if (message?.type !== "saveDefaults") {
                 return;
             }
@@ -84,9 +105,18 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
         });
     }
 
-    private getViewerHtml(filename: string, imageSrc: string, initialOptions: AlphaOptions): string {
+    private loadPngData(filePath: string): RawPngData {
+        const inputBuffer = fs.readFileSync(filePath);
+        const decoded = PNG.sync.read(inputBuffer);
+        return {
+            width: decoded.width,
+            height: decoded.height,
+            rgbaBase64: Buffer.from(decoded.data).toString("base64"),
+        };
+    }
+
+    private getViewerHtml(filename: string, initialOptions: AlphaOptions): string {
         const initialOptionsJson = JSON.stringify(initialOptions);
-        const imageSrcJson = JSON.stringify(imageSrc);
         return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -162,14 +192,7 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
             overflow: hidden;
             position: relative;
             cursor: default;
-            background-color: #d9d9d9;
-            background-image:
-                linear-gradient(45deg, #c4c4c4 25%, transparent 25%),
-                linear-gradient(-45deg, #c4c4c4 25%, transparent 25%),
-                linear-gradient(45deg, transparent 75%, #c4c4c4 75%),
-                linear-gradient(-45deg, transparent 75%, #c4c4c4 75%);
-            background-size: 20px 20px;
-            background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+            background-color: var(--vscode-editor-background);
         }
         canvas#image {
             position: absolute;
@@ -177,6 +200,14 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
             top: 0;
             transform-origin: 0 0;
             image-rendering: auto;
+            background-color: #232629;
+            background-image:
+                linear-gradient(45deg, #2f3337 25%, transparent 25%),
+                linear-gradient(-45deg, #2f3337 25%, transparent 25%),
+                linear-gradient(45deg, transparent 75%, #2f3337 75%),
+                linear-gradient(-45deg, transparent 75%, #2f3337 75%);
+            background-size: 16px 16px;
+            background-position: 0 0, 0 8px, 8px -8px, -8px 0;
         }
         .scrollbar {
             position: absolute;
@@ -241,7 +272,6 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
         (function() {
             const vscode = acquireVsCodeApi();
             const initialOptions = ${initialOptionsJson};
-            const imageSrc = ${imageSrcJson};
 
             const container = document.getElementById("container");
             const imageCanvas = document.getElementById("image");
@@ -254,16 +284,15 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
             const scrollbarBottomThumb = document.getElementById("scrollbarBottomThumb");
 
             const imageCtx = imageCanvas.getContext("2d");
-            const sourceCanvas = document.createElement("canvas");
-            const sourceCtx = sourceCanvas.getContext("2d");
-            const sourceImage = new Image();
-
             let scale = 1;
             let translateX = 0;
             let translateY = 0;
             let hasImage = false;
             let scrollbarFadeTimeout = null;
             let useAlpha = initialOptions.useAlpha !== false;
+            let sourcePixels = null;
+            let sourceWidth = 0;
+            let sourceHeight = 0;
 
             function setStatus(text, isError) {
                 status.textContent = text;
@@ -393,28 +422,38 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
                 updateScrollIndicators();
             }
 
+            function base64ToUint8ClampedArray(base64) {
+                const binary = atob(base64);
+                const bytes = new Uint8ClampedArray(binary.length);
+                for (let i = 0; i < binary.length; i += 1) {
+                    bytes[i] = binary.charCodeAt(i);
+                }
+                return bytes;
+            }
+
             function renderToDisplay() {
-                if (!sourceCtx || !imageCtx) {
+                if (!imageCtx) {
                     setStatus("Canvas context unavailable", true);
                     return;
                 }
+                if (!sourcePixels) {
+                    setStatus("Waiting for image data...", false);
+                    return;
+                }
 
-                const width = sourceCanvas.width;
-                const height = sourceCanvas.height;
+                const width = sourceWidth;
+                const height = sourceHeight;
                 imageCanvas.width = width;
                 imageCanvas.height = height;
 
-                if (useAlpha) {
-                    imageCtx.clearRect(0, 0, width, height);
-                    imageCtx.drawImage(sourceCanvas, 0, 0);
-                } else {
-                    const imgData = sourceCtx.getImageData(0, 0, width, height);
-                    const data = imgData.data;
+                const outputPixels = new Uint8ClampedArray(sourcePixels);
+                if (!useAlpha) {
+                    const data = outputPixels;
                     for (let i = 3; i < data.length; i += 4) {
                         data[i] = 255;
                     }
-                    imageCtx.putImageData(imgData, 0, 0);
                 }
+                imageCtx.putImageData(new ImageData(outputPixels, width, height), 0, 0);
 
                 if (!hasImage) {
                     hasImage = true;
@@ -425,27 +464,9 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
                 setStatus("Ready", false);
             }
 
-            function loadImage() {
-                sourceImage.onload = function() {
-                    if (!sourceCtx) {
-                        setStatus("Canvas context unavailable", true);
-                        return;
-                    }
-                    sourceCanvas.width = sourceImage.naturalWidth;
-                    sourceCanvas.height = sourceImage.naturalHeight;
-                    sourceCtx.clearRect(0, 0, sourceCanvas.width, sourceCanvas.height);
-                    sourceCtx.drawImage(sourceImage, 0, 0);
-                    renderToDisplay();
-                };
-                sourceImage.onerror = function() {
-                    setStatus("Failed to load PNG", true);
-                };
-                sourceImage.src = imageSrc;
-            }
-
             setOptions(initialOptions);
             setStatus("Loading...", false);
-            loadImage();
+            vscode.postMessage({ type: "webviewReady" });
 
             useAlphaInput.addEventListener("change", function() {
                 useAlpha = useAlphaInput.checked;
@@ -460,6 +481,18 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
 
             window.addEventListener("message", function(event) {
                 const message = event.data;
+                if (message && message.type === "imageLoaded") {
+                    sourceWidth = Number(message.width) || 0;
+                    sourceHeight = Number(message.height) || 0;
+                    sourcePixels = base64ToUint8ClampedArray(message.rgbaBase64 || "");
+                    const expectedSize = sourceWidth * sourceHeight * 4;
+                    if (!sourceWidth || !sourceHeight || sourcePixels.length !== expectedSize) {
+                        setStatus("Invalid PNG image data", true);
+                        return;
+                    }
+                    renderToDisplay();
+                    return;
+                }
                 if (message && message.type === "defaultsSaved") {
                     setStatus("Defaults saved", false);
                 }
@@ -500,6 +533,52 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
             });
         })();
     </script>
+</body>
+</html>`;
+    }
+
+    private getErrorHtml(errorMessage: string): string {
+        return `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PNG Viewer - Error</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 32px;
+            background-color: var(--vscode-editor-background);
+            color: var(--vscode-editor-foreground);
+            font-family: var(--vscode-font-family);
+        }
+        .error {
+            max-width: 860px;
+            margin: 0 auto;
+            padding: 18px;
+            border-radius: 6px;
+            border: 1px solid var(--vscode-inputValidation-errorBorder);
+            background: var(--vscode-inputValidation-errorBackground);
+        }
+        h2 {
+            margin-top: 0;
+            color: var(--vscode-errorForeground);
+        }
+        pre {
+            margin: 0;
+            white-space: pre-wrap;
+            word-break: break-word;
+            background: var(--vscode-textCodeBlock-background);
+            padding: 10px;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="error">
+        <h2>Failed to Load PNG</h2>
+        <pre>${this.escapeHtml(errorMessage)}</pre>
+    </div>
 </body>
 </html>`;
     }

@@ -40,9 +40,12 @@
   },
   "devDependencies": {
     "@types/node": "^18.0.0",
+    "@types/pngjs": "^6.0.5",
     "@types/vscode": "^1.80.0",
     "@vscode/vsce": "^2.19.0",
     "typescript": "^5.0.0"
   },
-  "dependencies": {}
+  "dependencies": {
+    "pngjs": "^7.0.0"
+  }
 }
