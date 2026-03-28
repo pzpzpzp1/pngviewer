@@ -27,7 +27,7 @@ export function activate(context: vscode.ExtensionContext): void {
             webviewOptions: {
                 retainContextWhenHidden: true,
             },
-            supportsMultipleEditorsPerDocument: false,
+            supportsMultipleEditorsPerDocument: true,
         }),
     );
 }
@@ -209,6 +209,7 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
             top: 0;
             transform-origin: 0 0;
             image-rendering: auto;
+            will-change: transform, left, top;
             background-color: #232629;
             background-image:
                 linear-gradient(45deg, #2f3337 25%, transparent 25%),
@@ -542,14 +543,21 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
                     const mouseY = e.clientY - rect.top;
                     const imageX = (mouseX - translateX) / scale;
                     const imageY = (mouseY - translateY) / scale;
-                    const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
-                    const newScale = scale * zoomFactor;
-                    if (newScale >= 0.1 && newScale <= 20) {
-                        scale = newScale;
-                        translateX = mouseX - imageX * scale;
-                        translateY = mouseY - imageY * scale;
-                        updateTransform();
+
+                    // Delta-aware exponential zoom is much smoother for high-resolution
+                    // trackpad gesture streams (especially on large images).
+                    const zoomIntensity = 0.006;
+                    const zoomFactor = Math.exp(-e.deltaY * zoomIntensity);
+                    const targetScale = scale * zoomFactor;
+                    const newScale = Math.min(20, Math.max(0.1, targetScale));
+                    if (newScale === scale) {
+                        return;
                     }
+
+                    scale = newScale;
+                    translateX = mouseX - imageX * scale;
+                    translateY = mouseY - imageY * scale;
+                    updateTransform();
                 } else {
                     const panSpeed = 1.5;
                     translateX -= e.deltaX * panSpeed;
