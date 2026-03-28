@@ -17,6 +17,7 @@ const DEFAULT_ALPHA_OPTIONS: AlphaOptions = {
 type RawPngData = {
     width: number;
     height: number;
+    style: "L" | "RGB" | "RGBA";
     rgbaBytes: Uint8Array;
 };
 
@@ -66,6 +67,7 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
         token: vscode.CancellationToken,
     ): Promise<void> {
         const currentOptions = this.getSavedOptions();
+        const fileStats = await fs.promises.stat(document.uri.fsPath);
         let rawPngData: RawPngData;
         try {
             rawPngData = await this.loadPngData(document.uri.fsPath);
@@ -79,7 +81,11 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
         webviewPanel.webview.options = {
             enableScripts: true,
         };
-        webviewPanel.webview.html = this.getViewerHtml(path.basename(document.uri.fsPath), currentOptions);
+        webviewPanel.webview.html = this.getViewerHtml(
+            path.basename(document.uri.fsPath),
+            `WxH ${rawPngData.width}x${rawPngData.height} • ${rawPngData.style} • ${this.formatFileSize(fileStats.size)}`,
+            currentOptions,
+        );
 
         webviewPanel.webview.onDidReceiveMessage(async (message) => {
             if (message?.type === "webviewReady") {
@@ -120,11 +126,36 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
         return {
             width: decoded.width,
             height: decoded.height,
+            style: this.getDisplayStyle(decoded as PNG & { colorType?: number }),
             rgbaBytes: Uint8Array.from(decoded.data),
         };
     }
 
-    private getViewerHtml(filename: string, initialOptions: AlphaOptions): string {
+    private getDisplayStyle(decoded: PNG & { colorType?: number }): "L" | "RGB" | "RGBA" {
+        if (decoded.colorType === 0) {
+            return "L";
+        }
+        if (decoded.colorType === 2) {
+            return "RGB";
+        }
+        return "RGBA";
+    }
+
+    private formatFileSize(bytes: number): string {
+        const KB = 1000;
+        const MB = KB * 1000;
+        const GB = MB * 1000;
+
+        if (bytes >= GB) {
+            return `${(bytes / GB).toFixed(1)} GB`;
+        }
+        if (bytes >= MB) {
+            return `${(bytes / MB).toFixed(1)} MB`;
+        }
+        return `${(bytes / KB).toFixed(1)} KB`;
+    }
+
+    private getViewerHtml(filename: string, imageInfo: string, initialOptions: AlphaOptions): string {
         const initialOptionsJson = JSON.stringify(initialOptions);
         return `<!DOCTYPE html>
 <html lang="en">
@@ -163,7 +194,12 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
-            max-width: 50vw;
+            max-width: 38vw;
+        }
+        .meta {
+            color: var(--vscode-descriptionForeground);
+            font-size: 12px;
+            white-space: nowrap;
         }
         .control {
             display: inline-flex;
@@ -262,6 +298,7 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
     <div class="viewer-root">
         <div class="toolbar">
             <span class="title">${this.escapeHtml(filename)}</span>
+            <span class="meta">${this.escapeHtml(imageInfo)}</span>
             <label class="control"><input type="checkbox" id="useAlpha"> Alpha</label>
             <button id="saveDefaults">Save Defaults</button>
             <span class="status" id="status">Loading...</span>
