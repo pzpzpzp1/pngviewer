@@ -8,7 +8,11 @@ tsconfig.json
 **/*.map
 **/*.ts
 node_modules/**
+!node_modules/pngjs/**
+!node_modules/pngjs/package.json
 *.md
 a.png
 b.png
 big.png
+bigbig.png
+*.png

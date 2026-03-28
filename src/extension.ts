@@ -5,6 +5,7 @@ import * as vscode from "vscode";
 
 const VIEW_TYPE = "pngViewer.png";
 const ALPHA_OPTIONS_STORAGE_KEY = "pngViewer.alphaOptions";
+const IMAGE_TRANSFER_CHUNK_SIZE = 256 * 1024;
 
 type AlphaOptions = {
     useAlpha: boolean;
@@ -83,17 +84,31 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
         };
         webviewPanel.webview.html = this.getViewerHtml(
             path.basename(document.uri.fsPath),
-            `WxH ${rawPngData.width}x${rawPngData.height} • ${rawPngData.style} • ${this.formatFileSize(fileStats.size)}`,
+            `WxH ${rawPngData.width}x${rawPngData.height} • ${rawPngData.style} • ${this.formatFileSize(fileStats.size)} • v${this.context.extension.packageJSON.version}`,
             currentOptions,
         );
 
         webviewPanel.webview.onDidReceiveMessage(async (message) => {
             if (message?.type === "webviewReady") {
+                const totalBytes = rawPngData.rgbaBytes.length;
                 await webviewPanel.webview.postMessage({
-                    type: "imageLoaded",
+                    type: "imageLoadStart",
                     width: rawPngData.width,
                     height: rawPngData.height,
-                    rgbaBytes: rawPngData.rgbaBytes,
+                    totalBytes,
+                });
+
+                for (let offset = 0; offset < totalBytes; offset += IMAGE_TRANSFER_CHUNK_SIZE) {
+                    const nextOffset = Math.min(offset + IMAGE_TRANSFER_CHUNK_SIZE, totalBytes);
+                    await webviewPanel.webview.postMessage({
+                        type: "imageLoadChunk",
+                        offset,
+                        chunk: rawPngData.rgbaBytes.slice(offset, nextOffset),
+                    });
+                }
+
+                await webviewPanel.webview.postMessage({
+                    type: "imageLoadComplete",
                 });
                 return;
             }
@@ -341,6 +356,9 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
             let opaqueImageData = null;
             let sourceWidth = 0;
             let sourceHeight = 0;
+            let expectedBytes = 0;
+            let receivedBytes = 0;
+            let hostResponseTimeout = null;
 
             function setStatus(text, isError) {
                 status.textContent = text;
@@ -535,6 +553,11 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
 
             setOptions(initialOptions);
             setStatus("Loading...", false);
+            hostResponseTimeout = setTimeout(function() {
+                if (!sourcePixels) {
+                    setStatus("No response from extension host", true);
+                }
+            }, 5000);
             vscode.postMessage({ type: "webviewReady" });
 
             useAlphaInput.addEventListener("change", function() {
@@ -549,17 +572,58 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
 
             window.addEventListener("message", function(event) {
                 const message = event.data;
-                if (message && message.type === "imageLoaded") {
+                if (message && message.type === "imageLoadStart") {
+                    if (hostResponseTimeout !== null) {
+                        clearTimeout(hostResponseTimeout);
+                        hostResponseTimeout = null;
+                    }
                     sourceWidth = Number(message.width) || 0;
                     sourceHeight = Number(message.height) || 0;
-                    sourcePixels = toUint8ClampedArray(message.rgbaBytes);
-                    const expectedSize = sourceWidth * sourceHeight * 4;
-                    if (!sourcePixels || !sourceWidth || !sourceHeight || sourcePixels.length !== expectedSize) {
+                    expectedBytes = Number(message.totalBytes) || 0;
+                    receivedBytes = 0;
+
+                    if (!sourceWidth || !sourceHeight || !expectedBytes) {
                         setStatus("Invalid PNG image data", true);
                         return;
                     }
+
+                    sourcePixels = new Uint8ClampedArray(expectedBytes);
                     sourceImageData = null;
                     opaqueImageData = null;
+                    setStatus("Loading image data...", false);
+                    return;
+                }
+
+                if (message && message.type === "imageLoadChunk") {
+                    if (!sourcePixels || !(sourcePixels instanceof Uint8ClampedArray)) {
+                        setStatus("Invalid PNG image data", true);
+                        return;
+                    }
+                    const offset = Number(message.offset) || 0;
+                    const chunk = toUint8ClampedArray(message.chunk);
+                    if (!chunk || offset < 0 || offset + chunk.length > sourcePixels.length) {
+                        setStatus("Invalid PNG image data", true);
+                        return;
+                    }
+                    sourcePixels.set(chunk, offset);
+                    receivedBytes += chunk.length;
+                    const progress = Math.min(100, Math.round((receivedBytes / Math.max(expectedBytes, 1)) * 100));
+                    setStatus("Loading image data... " + progress + "%", false);
+                    return;
+                }
+
+                if (message && message.type === "imageLoadComplete") {
+                    const expectedSize = sourceWidth * sourceHeight * 4;
+                    if (
+                        !sourcePixels ||
+                        !(sourcePixels instanceof Uint8ClampedArray) ||
+                        sourcePixels.length !== expectedBytes ||
+                        expectedBytes !== expectedSize ||
+                        receivedBytes < expectedBytes
+                    ) {
+                        setStatus("Invalid PNG image data", true);
+                        return;
+                    }
                     renderToDisplay();
                     return;
                 }

@@ -26,11 +26,20 @@
         "selector": [
           {
             "filenamePattern": "*.png"
+          },
+          {
+            "filenamePattern": "*.PNG"
           }
         ],
         "priority": "default"
       }
-    ]
+    ],
+    "configurationDefaults": {
+      "workbench.editorAssociations": {
+        "*.png": "pngViewer.png",
+        "*.PNG": "pngViewer.png"
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
