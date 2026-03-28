@@ -17,7 +17,7 @@ const DEFAULT_ALPHA_OPTIONS: AlphaOptions = {
 type RawPngData = {
     width: number;
     height: number;
-    rgbaBase64: string;
+    rgbaBytes: Uint8Array;
 };
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -68,7 +68,7 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
         const currentOptions = this.getSavedOptions();
         let rawPngData: RawPngData;
         try {
-            rawPngData = this.loadPngData(document.uri.fsPath);
+            rawPngData = await this.loadPngData(document.uri.fsPath);
         } catch (error) {
             const errorMessage =
                 error instanceof Error ? error.message : "Failed to decode PNG file.";
@@ -87,7 +87,7 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
                     type: "imageLoaded",
                     width: rawPngData.width,
                     height: rawPngData.height,
-                    rgbaBase64: rawPngData.rgbaBase64,
+                    rgbaBytes: rawPngData.rgbaBytes,
                 });
                 return;
             }
@@ -105,13 +105,22 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
         });
     }
 
-    private loadPngData(filePath: string): RawPngData {
-        const inputBuffer = fs.readFileSync(filePath);
-        const decoded = PNG.sync.read(inputBuffer);
+    private async loadPngData(filePath: string): Promise<RawPngData> {
+        const inputBuffer = await fs.promises.readFile(filePath);
+        const decoded = await new Promise<PNG>((resolve, reject) => {
+            const parser = new PNG();
+            parser.parse(inputBuffer, (error, data) => {
+                if (error) {
+                    reject(error);
+                    return;
+                }
+                resolve(data);
+            });
+        });
         return {
             width: decoded.width,
             height: decoded.height,
-            rgbaBase64: Buffer.from(decoded.data).toString("base64"),
+            rgbaBytes: Uint8Array.from(decoded.data),
         };
     }
 
@@ -289,8 +298,9 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
             let translateY = 0;
             let hasImage = false;
             let scrollbarFadeTimeout = null;
-            let useAlpha = initialOptions.useAlpha !== false;
             let sourcePixels = null;
+            let sourceImageData = null;
+            let opaqueImageData = null;
             let sourceWidth = 0;
             let sourceHeight = 0;
 
@@ -305,7 +315,6 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
 
             function setOptions(options) {
                 useAlphaInput.checked = options.useAlpha !== false;
-                useAlpha = useAlphaInput.checked;
             }
 
             function getImageBaseSize() {
@@ -422,13 +431,31 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
                 updateScrollIndicators();
             }
 
-            function base64ToUint8ClampedArray(base64) {
-                const binary = atob(base64);
-                const bytes = new Uint8ClampedArray(binary.length);
-                for (let i = 0; i < binary.length; i += 1) {
-                    bytes[i] = binary.charCodeAt(i);
+            function toUint8ClampedArray(value) {
+                if (value instanceof Uint8Array) {
+                    return new Uint8ClampedArray(value);
                 }
-                return bytes;
+                if (value instanceof Uint8ClampedArray) {
+                    return new Uint8ClampedArray(value);
+                }
+                if (value instanceof ArrayBuffer) {
+                    return new Uint8ClampedArray(value);
+                }
+                if (Array.isArray(value)) {
+                    return new Uint8ClampedArray(value);
+                }
+                if (
+                    value &&
+                    typeof value === "object" &&
+                    value.type === "Buffer" &&
+                    Array.isArray(value.data)
+                ) {
+                    return new Uint8ClampedArray(value.data);
+                }
+                if (value && typeof value === "object" && Array.isArray(value.data)) {
+                    return new Uint8ClampedArray(value.data);
+                }
+                return null;
             }
 
             function renderToDisplay() {
@@ -446,14 +473,18 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
                 imageCanvas.width = width;
                 imageCanvas.height = height;
 
-                const outputPixels = new Uint8ClampedArray(sourcePixels);
-                if (!useAlpha) {
-                    const data = outputPixels;
-                    for (let i = 3; i < data.length; i += 4) {
-                        data[i] = 255;
-                    }
+                if (!sourceImageData) {
+                    sourceImageData = new ImageData(sourcePixels, width, height);
                 }
-                imageCtx.putImageData(new ImageData(outputPixels, width, height), 0, 0);
+                if (!useAlphaInput.checked && !opaqueImageData) {
+                    const opaquePixels = new Uint8ClampedArray(sourcePixels);
+                    for (let i = 3; i < opaquePixels.length; i += 4) {
+                        opaquePixels[i] = 255;
+                    }
+                    opaqueImageData = new ImageData(opaquePixels, width, height);
+                }
+
+                imageCtx.putImageData(useAlphaInput.checked ? sourceImageData : opaqueImageData, 0, 0);
 
                 if (!hasImage) {
                     hasImage = true;
@@ -469,7 +500,6 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
             vscode.postMessage({ type: "webviewReady" });
 
             useAlphaInput.addEventListener("change", function() {
-                useAlpha = useAlphaInput.checked;
                 if (hasImage) {
                     renderToDisplay();
                 }
@@ -484,12 +514,14 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
                 if (message && message.type === "imageLoaded") {
                     sourceWidth = Number(message.width) || 0;
                     sourceHeight = Number(message.height) || 0;
-                    sourcePixels = base64ToUint8ClampedArray(message.rgbaBase64 || "");
+                    sourcePixels = toUint8ClampedArray(message.rgbaBytes);
                     const expectedSize = sourceWidth * sourceHeight * 4;
-                    if (!sourceWidth || !sourceHeight || sourcePixels.length !== expectedSize) {
+                    if (!sourcePixels || !sourceWidth || !sourceHeight || sourcePixels.length !== expectedSize) {
                         setStatus("Invalid PNG image data", true);
                         return;
                     }
+                    sourceImageData = null;
+                    opaqueImageData = null;
                     renderToDisplay();
                     return;
                 }

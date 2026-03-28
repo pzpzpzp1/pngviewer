@@ -2,9 +2,13 @@
 .jj/**
 .cursor/**
 agent-transcripts/**
+.vscode/**
 src/**
 tsconfig.json
 **/*.map
 **/*.ts
 node_modules/**
 *.md
+a.png
+b.png
+big.png
