@@ -1,0 +1,10 @@
+.git/**
+.jj/**
+.cursor/**
+agent-transcripts/**
+src/**
+tsconfig.json
+**/*.map
+**/*.ts
+node_modules/**
+*.md
