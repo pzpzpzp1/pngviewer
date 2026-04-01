@@ -90,39 +90,57 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
 
         webviewPanel.webview.onDidReceiveMessage(async (message) => {
             if (message?.type === "webviewReady") {
-                const totalBytes = rawPngData.rgbaBytes.length;
-                await webviewPanel.webview.postMessage({
-                    type: "imageLoadStart",
-                    width: rawPngData.width,
-                    height: rawPngData.height,
-                    totalBytes,
-                });
+                await this.sendImageDataToWebview(webviewPanel, rawPngData, fileStats.size);
+                return;
+            }
 
-                for (let offset = 0; offset < totalBytes; offset += IMAGE_TRANSFER_CHUNK_SIZE) {
-                    const nextOffset = Math.min(offset + IMAGE_TRANSFER_CHUNK_SIZE, totalBytes);
-                    await webviewPanel.webview.postMessage({
-                        type: "imageLoadChunk",
-                        offset,
-                        chunk: rawPngData.rgbaBytes.slice(offset, nextOffset),
-                    });
+            if (message?.type === "refreshImage") {
+                try {
+                    const refreshedStats = await fs.promises.stat(document.uri.fsPath);
+                    const refreshedPngData = await this.loadPngData(document.uri.fsPath);
+                    rawPngData = refreshedPngData;
+                    await this.sendImageDataToWebview(webviewPanel, refreshedPngData, refreshedStats.size);
+                } catch (error) {
+                    const errorMessage =
+                        error instanceof Error ? error.message : "Failed to refresh PNG file.";
+                    await webviewPanel.webview.postMessage({ type: "renderError", errorMessage });
                 }
-
-                await webviewPanel.webview.postMessage({
-                    type: "imageLoadComplete",
-                });
                 return;
             }
 
-            if (message?.type !== "saveDefaults") {
+            if (message?.type === "alphaChanged") {
+                const nextDefaults = this.normalizeOptions(message.options);
+                await this.context.globalState.update(ALPHA_OPTIONS_STORAGE_KEY, nextDefaults);
                 return;
             }
+        });
+    }
 
-            const nextDefaults = this.normalizeOptions(message.options);
-            await this.context.globalState.update(ALPHA_OPTIONS_STORAGE_KEY, nextDefaults);
-            vscode.window.showInformationMessage(
-                `PNG Viewer: Saved default alpha setting (${nextDefaults.useAlpha ? "enabled" : "disabled"})`,
-            );
-            await webviewPanel.webview.postMessage({ type: "defaultsSaved" });
+    private async sendImageDataToWebview(
+        webviewPanel: vscode.WebviewPanel,
+        rawPngData: RawPngData,
+        fileSizeBytes: number,
+    ): Promise<void> {
+        const totalBytes = rawPngData.rgbaBytes.length;
+        await webviewPanel.webview.postMessage({
+            type: "imageLoadStart",
+            width: rawPngData.width,
+            height: rawPngData.height,
+            imageInfo: `WxH ${rawPngData.width}x${rawPngData.height} • ${rawPngData.style} • ${this.formatFileSize(fileSizeBytes)}`,
+            totalBytes,
+        });
+
+        for (let offset = 0; offset < totalBytes; offset += IMAGE_TRANSFER_CHUNK_SIZE) {
+            const nextOffset = Math.min(offset + IMAGE_TRANSFER_CHUNK_SIZE, totalBytes);
+            await webviewPanel.webview.postMessage({
+                type: "imageLoadChunk",
+                offset,
+                chunk: rawPngData.rgbaBytes.slice(offset, nextOffset),
+            });
+        }
+
+        await webviewPanel.webview.postMessage({
+            type: "imageLoadComplete",
         });
     }
 
@@ -203,6 +221,34 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
             padding: 8px 12px;
             border-bottom: 1px solid var(--vscode-panel-border);
             background-color: var(--vscode-editorWidget-background);
+            transition: min-height 120ms ease-out, padding 120ms ease-out;
+        }
+        .toolbar.collapsed {
+            min-height: 6px;
+            padding: 1px 3px;
+            gap: 3px;
+        }
+        .toolbar-toggle {
+            padding: 0 6px;
+            min-height: 18px;
+            line-height: 16px;
+            font-size: 11px;
+        }
+        .toolbar.collapsed .toolbar-toggle {
+            min-height: 10px;
+            line-height: 8px;
+            font-size: 9px;
+            padding: 0 3px;
+        }
+        .toolbar-controls {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            min-width: 0;
+        }
+        .toolbar.collapsed .toolbar-controls,
+        .toolbar.collapsed .status {
+            display: none;
         }
         .meta {
             color: var(--vscode-descriptionForeground);
@@ -226,6 +272,18 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
         }
         button:hover {
             background: var(--vscode-button-hoverBackground);
+        }
+        .icon-button {
+            padding: 0;
+            width: 24px;
+            height: 24px;
+            min-width: 24px;
+            min-height: 24px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+            line-height: 1;
         }
         .status {
             margin-left: auto;
@@ -304,10 +362,13 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
 </head>
 <body>
     <div class="viewer-root">
-        <div class="toolbar">
-            <label class="control"><input type="checkbox" id="useAlpha"> Alpha</label>
-            <span class="meta">${this.escapeHtml(imageInfo)}</span>
-            <button id="saveDefaults">Save Defaults</button>
+        <div class="toolbar" id="toolbar">
+            <button id="toggleToolbar" class="toolbar-toggle" title="Collapse controls">▾</button>
+            <div class="toolbar-controls" id="toolbarControls">
+                <label class="control"><input type="checkbox" id="useAlpha"> Alpha</label>
+                <span class="meta" id="imageMeta">${this.escapeHtml(imageInfo)}</span>
+                <button id="refreshImage" class="icon-button" title="Refresh image" aria-label="Refresh image">↻</button>
+            </div>
             <span class="status" id="status">Loading...</span>
         </div>
         <div class="content">
@@ -330,8 +391,11 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
             const container = document.getElementById("container");
             const imageCanvas = document.getElementById("image");
             const status = document.getElementById("status");
+            const toolbar = document.getElementById("toolbar");
+            const toggleToolbarButton = document.getElementById("toggleToolbar");
             const useAlphaInput = document.getElementById("useAlpha");
-            const saveDefaultsButton = document.getElementById("saveDefaults");
+            const imageMeta = document.getElementById("imageMeta");
+            const refreshImageButton = document.getElementById("refreshImage");
             const scrollbarLeft = document.getElementById("scrollbarLeft");
             const scrollbarLeftThumb = document.getElementById("scrollbarLeftThumb");
             const scrollbarBottom = document.getElementById("scrollbarBottom");
@@ -351,10 +415,40 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
             let expectedBytes = 0;
             let receivedBytes = 0;
             let hostResponseTimeout = null;
+            let toolbarCollapsed = false;
 
             function setStatus(text, isError) {
                 status.textContent = text;
                 status.classList.toggle("error", !!isError);
+            }
+
+            function applyToolbarCollapsed(nextCollapsed) {
+                toolbarCollapsed = !!nextCollapsed;
+                toolbar.classList.toggle("collapsed", toolbarCollapsed);
+                toggleToolbarButton.textContent = toolbarCollapsed ? "▸" : "▾";
+                toggleToolbarButton.title = toolbarCollapsed ? "Expand controls" : "Collapse controls";
+            }
+
+            function resetPendingImageData() {
+                sourcePixels = null;
+                sourceImageData = null;
+                opaqueImageData = null;
+                sourceWidth = 0;
+                sourceHeight = 0;
+                expectedBytes = 0;
+                receivedBytes = 0;
+                hasImage = false;
+            }
+
+            function beginHostWait(timeoutMessage) {
+                if (hostResponseTimeout !== null) {
+                    clearTimeout(hostResponseTimeout);
+                }
+                hostResponseTimeout = setTimeout(function() {
+                    if (!sourcePixels) {
+                        setStatus(timeoutMessage, true);
+                    }
+                }, 5000);
             }
 
             function getOptions() {
@@ -544,22 +638,27 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
             }
 
             setOptions(initialOptions);
+            applyToolbarCollapsed(false);
             setStatus("Loading...", false);
-            hostResponseTimeout = setTimeout(function() {
-                if (!sourcePixels) {
-                    setStatus("No response from extension host", true);
-                }
-            }, 5000);
+            beginHostWait("No response from extension host");
             vscode.postMessage({ type: "webviewReady" });
 
+            toggleToolbarButton.addEventListener("click", function() {
+                applyToolbarCollapsed(!toolbarCollapsed);
+            });
+
             useAlphaInput.addEventListener("change", function() {
+                vscode.postMessage({ type: "alphaChanged", options: getOptions() });
                 if (hasImage) {
                     renderToDisplay();
                 }
             });
 
-            saveDefaultsButton.addEventListener("click", function() {
-                vscode.postMessage({ type: "saveDefaults", options: getOptions() });
+            refreshImageButton.addEventListener("click", function() {
+                resetPendingImageData();
+                setStatus("Refreshing...", false);
+                beginHostWait("Refresh timed out");
+                vscode.postMessage({ type: "refreshImage" });
             });
 
             window.addEventListener("message", function(event) {
@@ -568,6 +667,9 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
                     if (hostResponseTimeout !== null) {
                         clearTimeout(hostResponseTimeout);
                         hostResponseTimeout = null;
+                    }
+                    if (typeof message.imageInfo === "string") {
+                        imageMeta.textContent = message.imageInfo;
                     }
                     sourceWidth = Number(message.width) || 0;
                     sourceHeight = Number(message.height) || 0;
@@ -619,8 +721,8 @@ class PngEditorProvider implements vscode.CustomReadonlyEditorProvider {
                     renderToDisplay();
                     return;
                 }
-                if (message && message.type === "defaultsSaved") {
-                    setStatus("Defaults saved", false);
+                if (message && message.type === "renderError") {
+                    setStatus(message.errorMessage || "Failed to load image", true);
                 }
             });
 
